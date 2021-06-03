@@ -1,0 +1,464 @@
+#!/bin/bash
+
+# Author: Mirko Graziani (mirkobau)
+# Name: dckvpn
+# Release: 20210603, from the dining table.
+# Language: bash scripting
+# Intended use: technical users (FIXME: make a YT video for making this available to everyone)
+# Requires: bash, docker container system, openssl, GNU coreutils.
+#
+# Description:
+# builds a docker image based on 'fedora' and uses it as a
+# selective gateway to a variety of concurrently open VPN Clients.
+#
+# Note1 - for Windows 8/10 (and beyond?)
+# Windows 10's network routing strategy is a great system..for domesticated monkeys.
+# So if you're such that evolved animal that you
+# expect to get what you typed in your routing table..
+# ..then you'll need to cope a couple of minutes with gpedit.msc.
+# So, after opening it:
+#
+# 1. Go to: Computer Configuration\Administrative Templates\Network\Windows Connection Manager
+# 2. Set 'Minimize Number of Simultaneous Connections to Internet or a Windows Domain' to "Enabled" and "0".
+# 3. Reboot
+# 4. Enjoy it, my little rascal: you're free now.
+#
+# Note2 - FIXME: option to choose from other docker images
+# But hey, after a quick search this was the only one I found
+# being able to install all required packages without any kind of magic tricks.
+# And honestly, if it works and this all is about docker,
+# then I don't feel portability as an essential issue.
+
+function dbg {
+   echo "$@" 1>&2
+}
+export -f dbg
+
+# Takes settings encrypted file,
+# decrypts it
+# gives to stdout a bunch of commands for 'eval'
+# that - hopefully - recreate saved variables and theyr respective values
+function loadsettings {
+   (
+      echo "$VPNNAME"
+      openssl enc -base64 -d < "$VPNSETTINGSFILE"
+   ) \
+   | openssl enc -aes-256-cbc -d -pbkdf2 -pass stdin
+}
+export -f loadsettings
+
+function savesettings {
+   (
+      echo "$VPNNAME"
+      # 'VPNVARNAMES' variable is populated in the global initialization part (see below)
+      for VPNVARNAME in $VPNVARNAMES ; do
+         echo "export $VPNVARNAME='${!VPNVARNAME}'"
+      done
+   ) \
+   | openssl enc -aes-256-cbc -base64 -pbkdf2 -pass stdin \
+   > "$VPNSETTINGSFILE"
+}
+export -f savesettings
+
+function todck {
+   # Write to docker container without translating any escape sequence.
+   for DCKNEXTLINE in "$@" ; do
+      echo -E "$DCKNEXTLINE" >&$todckfd
+   done
+}
+export -f todck
+
+function fmdck {
+   read -rst 0.3 -u $fmdckfd fmdckline
+   echo "$fmdckline"
+}
+export -f fmdck
+
+# make the container spit out a random variable (FIXME: $RANDOM isn't really random),
+# then send given commands to the container.
+# What's next?
+# 1. wait for that random variable in a single line by itself,
+#    eating out everything was in buffer before it.
+# 2. read lines from container and echo them to stdout, until we get an empty line
+# 
+# FIXME: (improvement) step2 --> read until we read a ceratin line marker
+function dckchat {
+   export DCKLINEMARK="DCKLINEMARK#$RANDOM"
+   export DCKNEXTLINE="$DCKLINEMARK"
+
+   # send to container the line marker and subsequent commands given
+   todck "echo $DCKNEXTLINE" "$@"
+
+   # Look for line marker
+   while [[ "$( fmdck )" != "$DCKLINEMARK" ]] ; do
+      true
+   done
+
+   # read & echo lines, until we get an empty one
+   # (this is intended as "nothing else to read")
+   while [[ -n "$DCKNEXTLINE" ]] ; do
+      export DCKNEXTLINE="$( fmdck )"
+      echo "$DCKNEXTLINE" | egrep -v "^ *\r?*$"
+   done
+}
+export -f dckchat
+
+# This is a little different from other '...dck' functions defined here.
+# 
+# We here execute a *new* shell inside the container, and pass it the given commands.
+# This is useful for inspecting main process behaviour,
+# like i.e. charon-cmd in ipsecvpn function, in which
+# we dynamically re-engineer routes created by charon-cmd.
+function indck {
+   for DCKNEXTLINE in "$@" ; do
+      echo "$DCKNEXTLINE"
+   done \
+   | docker container exec -i --privileged "$VPNNAME" su -s /bin/bash
+}
+
+# Launches a 'openfortivpn' client inside container for SSL VPN connections toward a FortiGate NGFW.
+function ofvpn {
+   export OFVPNCMD="openfortivpn '$VPNIP' -u '$VPNUSR' -p '$VPNPWD'"
+
+   export OFVPNLINE="$( dckchat "$OFVPNCMD 2>&1" )"
+   export OFVPNLINE="$( egrep -m1 "ERROR:.*--trusted-cert" <<< "$OFVPNLINE" )"
+
+   if [[ -n "$OFVPNLINE" ]] ; then
+      # openfortivpn could complatin about gateway's certificate, with a message like this:
+      #
+      # ERROR:  Gateway certificate validation failed, and the certificate digest is not in the local whitelist. If you trust it, rerun with:
+      # ERROR:      --trusted-cert HexCharsHexCharsHexCharsHexCharsHexCharsHexCharsHexCharsHexChars
+      #
+      # here, we just found a line with certificate fingerprint,
+      # so we re-push the command to docker container,
+      # this time with '--trusted-cert' option given and correctly set.
+
+      # Delete everything from OFVPNLINE until the colon (included).
+      # (in other words, delete the 'ERROR:' part at the beginning of the line)
+      #
+      # This will leave the suggested option ready for use.
+      export OFVPNCMD="$OFVPNCMD ${OFVPNLINE##*:}"
+
+      # Enqueue a fresh new openfortivpn command inside docker container.
+      todck "$OFVPNCMD 2>&1"
+   fi
+}
+export -f ofvpn
+
+# FIXME: this is still to be reviewed.
+# Lancia un 'openconnect'.
+# Tutti i parametri necessari sono preimpostati nelle variabili di ambiente
+function ocvpn {
+   export OCVPNCMD="openconnect -i '$IFNAME' '--protocol=$VPNTYPE' -u '$VPNUSR' --passwd-on-stdin '$VPNIP'"
+
+   export OCVPNLINE="$( dckchat "$OCVPNCMD 2>&1" "$VPNPWD" )"
+   export OCVPNLINE="$( egrep -m1 "ERROR:.*--trusted-cert" <<< "$OCVPNLINE" )"
+
+   while [[ -n "$OCVPNLINE" ]] ; do
+      echo "[$OCVPNLINE]"
+
+      # This comes just before "Enter 'yes' to accept, 'no' to abort" line.
+      # Line that will not be read until someone enters something, so the stdout will spit out a newline.
+      # This is why we look for the "line before" instead of the effective one.
+      if [[ "${ocprocsdout:0:12}" == "--servercert" ]] ; then
+         todck yes
+      fi
+
+      if [[ "$ocprocsdout" == "Username:" ]] ; then
+         echo "$VPNUSR"
+      fi
+
+      if [[ "$ocprocsdout" == "Password:" ]] ; then
+         echo "$VPNPWD" >&${ocproc[1]}
+      fi
+
+      if [[ "$ocprocsdout" == "" ]] ; then
+         true
+      fi
+
+      if [[ "$ocprocsdout" == "" ]] ; then
+         true
+      fi
+   done
+}
+export -f ocvpn
+
+function ipsecvpn {
+   # https://wiki.strongswan.org/projects/strongswan/wiki/IKEv1CipherSuites
+   export DHGROUPS="
+   s/DH1/modp768/g
+   s/DH2/modp1024/g
+   s/DH5/modp1536/g
+   s/DH14/modp2048/g
+   s/DH15/modp3072/g
+   s/DH16/modp4096/g
+   s/DH17/modp6144/g
+   s/DH18/modp8192/g
+   s/DH22/modp1024s160/g
+   s/DH23/modp2048s224/g
+   s/DH24/modp2048s256/g
+   s/DH25/ecp192/g
+   s/DH26/ecp224/g
+   s/DH19/ecp256/g
+   s/DH20/ecp384/g
+   s/DH21/ecp521/g
+   s/DH27/ecp224bp/g
+   s/DH28/ecp256bp/g
+   s/DH29/ecp384bp/g
+   s/DH30/ecp512bp/g
+   s/DH31/curve25519/g
+   s/DH31/x25519/g
+   "
+
+   export VPNPHASE1EDIT="$( sed -re "$DHGROUPS" <<< "$VPNPHASE1" )"
+   export VPNPHASE2EDIT="$( sed -re "$DHGROUPS" <<< "$VPNPHASE2" )"
+
+   # Convert phase1 and phase2 cipher suites definitions to lowercase
+   export VPNPHASE1EDIT="${VPNPHASE1EDIT,,}"
+   export VPNPHASE2EDIT="${VPNPHASE2EDIT,,}"
+
+   indck "ip route flush table 220"
+
+   todck \
+      "charon-cmd \\
+      --host '$VPNIP' \\
+      --remote-identity %any \\
+      --identity '$VPNID' \\
+      --xauth-username '$VPNUSR' \\
+      --profile ikev1-xauth-psk-am \\
+      --ike-proposal '$VPNPHASE1EDIT' \\
+      --esp-proposal '$VPNPHASE2EDIT' \\
+      --debug -1"
+   
+   sleep 2
+   todck "$VPNPSK"
+   
+   sleep 1
+   todck "$VPNPWD"
+
+   export VPNCLITABLE=""
+   while [[ -z "$VPNCLITABLE" ]] ; do
+      sleep 1
+      export VPNCLITABLE="$( indck "ip route list table 220 exact default" )"
+   done
+
+   export VPNCLIDEV="${VPNCLITABLE##* dev }"
+   export VPNCLIDEV="${VPNCLIDEV%% *}"
+
+   export VPNCLIIP="${VPNCLITABLE##* src }"
+   export VPNCLIIP="${VPNCLIIP%% *}"
+
+   indck "ip route flush table 220"
+   for VPNROUTE in $VPNROUTES ; do
+      indck \
+         "ip route add '$VPNROUTE' dev $VPNCLIDEV via '$VPNCLIIP' table 220" \
+         "iptables -t nat -I POSTROUTING -d '$VPNROUTE' -j SNAT --to-source '$VPNCLIIP'"
+   done
+}
+export -f ipsecvpn
+
+function cleanroutes {
+   # Clean host's old routes to this container.
+   # The list is empty if there aren't specific routes defined.
+   ip route list \
+   | sed -nre "/via $DCKIP dev docker0/{s/^.+$/ip route del &/g;p}" \
+   | bash -s
+}
+export -f cleanroutes
+
+function setroutes {
+   # Rebuild iptables rules
+   # FIXME: create better iptables rules, based on the actual
+   # interface and/or IP addresses used in docker container.
+   for IFNAME in gpd0 tun0 tun8 vpn ppp0 ; do
+      todck "(
+         iptables -t nat -D POSTROUTING -o $IFNAME -j MASQUERADE
+         iptables -t nat -D POSTROUTING -o $IFNAME -j MASQUERADE
+         iptables -t nat -I POSTROUTING -o $IFNAME -j MASQUERADE
+      ) &> /dev/null"
+   done
+
+   # Clean all predefined routes if already defined.
+   cleanroutes
+
+   # set host's new routes to the container
+   for VPNROUTE in $VPNROUTES ; do
+      ip route add $VPNROUTE dev docker0 via $DCKIP
+   done
+}
+export -f setroutes
+
+# Verify the base image is ready; if not, prepare it.
+if [[ -z "$(docker image ls dckvpn -q 2> /dev/null)" ]] ; then
+   
+   # Pull base image.
+   # Fedora has been found to be suitable for our needs.
+   docker image pull fedora
+
+   # we need some packages to make everything run OK
+   docker container run --name dckvpn -i --privileged fedora su <<< '
+      dnf -y install iproute iptables iputils nftables tcpdump
+      dnf -y install openfortivpn openconnect vpnc openvpn strongswan
+      dnf -y install openssh
+      dnf -y upgrade
+   '
+
+   # FIXME: check if packages were correctly installed
+   #echo -m 256M --cpus 1
+   # This will be our image with which we'll work.
+   docker commit dckvpn dckvpn
+   # The container is no longer useful.
+   docker container rm dckvpn
+   # Spit out a message about the end of preparation.
+   docker container run --name dckvpn -it --privileged --rm dckvpn bash -c "echo Image dckvpn is ready."
+fi
+
+# FIXME: verify host's NIC IP address is a link-local (169.254.0.0/16)
+# or whatever other security and/or security-through-obscurity feature
+# that gives in some way a pretty good ensurance about host's security.
+
+
+# VPN Name is a key value:
+# - it's used to compose the settings file name,
+# - it's used as a (weak) encryption key for settings file
+#   About this: I *KNOW* this has nothing to do with security in any way,
+#   but at the same time this is a base from which to start for an improvement.
+#   (see comments to VPNENCPWD variable)
+export VPNNAME=""
+while [[ -z "$VPNNAME" ]] ; do
+   echo -n "VPN Name:"
+   read -r VPNNAME
+done
+
+# This will be the encryption key, read from stdin by openssl.
+# FIXME: use a better encryption key.
+#        For example, ask the key to the user everytime they launch this script.
+#        Or read the key from user's computer through an SSH (cygwin or similar required for Windows environments).
+#        The following is just a basic idea to get system BIOS UUID:
+#
+#           wmic path win32_computersystemproduct get uuid | egrep "^.{8}(-.{4}){4}.{8}"
+export VPNENCPWD="$VPNNAME"
+
+# FIXME: kill an already-running container with same name
+
+# Spawn a container in a bash coprocess.
+# The container is interactive (meaning stdXXX file descriptors are attached to our session)
+# We run as root inside the container, and we get a standard bash environment by elevating our privileges with 'su'.
+# The shell is interactive, meaning that it will receive our stind ad will give us its stdout.
+coproc dckvpnproc {
+   docker container run -i --name "$VPNNAME" --privileged --rm dckvpn su -s /bin/bash 2>&1
+}
+
+export dckvpnproc
+
+# FIXME: container must be running
+
+# cosmetic: take out the coproc stdin and stoud file descriptors
+export todckfd=${dckvpnproc[1]}
+export fmdckfd=${dckvpnproc[0]}
+
+# Take host's IP as seen from inside docker.
+# This is (sould be) the same address in host's ip route tables.
+export HOSTIP="$( dckchat 'ip route list exact default | cut -d " " -f 3' )"
+
+# Take container's IP: this will be used when setting host's routes.
+export DCKIP="$( 
+   dckchat '
+      ip addr list dev eth0 \
+      | egrep " inet " \
+      | cut -d / -f 1 \
+      | cut -d t -f 2 \
+      | cut -d " " -f 2
+   '
+)"
+
+echo "DCKIP=$DCKIP   HOSTIP=$HOSTIP"
+
+# We'll work on this global variables.
+export VPNVARSFM="$(( $LINENO + 1 ))"
+export VPNROUTES=""
+export VPNTYPE=""
+export VPNIP=""
+export VPNUSR=""
+export VPNPWD=""
+export VPNID=""
+export VPNPHASE1=""
+export VPNPHASE2=""
+export VPNPSK=""
+export VPNVARSTO="$(( $LINENO - 1 ))"
+
+export VPNVARNAMES="$(
+   sed -nre "$VPNVARSFM,$VPNVARSTO{
+      s/^[^ ]+ ([^=]+)=.*$/\1/g
+      p
+   }" "$0"
+)"
+
+export VPNSETTINGSFILE="$VPNNAME.dckvpn"
+# Take variable's values from saved file, if present
+if [[ -f "$VPNSETTINGSFILE" ]] ; then
+   eval "$( loadsettings )"
+else
+   echo -n "  Routes:"
+   read -r VPNROUTES
+
+   echo -n "VPN type:"
+   read -r VPNTYPE
+
+   echo -n " Peer IP:"
+   read -r VPNIP
+
+   echo -n "     Usr:"
+   read -r VPNUSR
+   echo -n "     Pwd:"
+   read -rs VPNPWD
+fi
+
+export VPNTYPE="${VPNTYPE,,}"
+
+# Set routes before starting any kind of VPN client
+setroutes
+
+case "$VPNTYPE" in
+gp|anyconnect|ac)
+   if [[ "$VPNTYPE" == "ac" ]] ; then
+      export VPNTYPE="anyconnect"
+   fi
+   ocvpn
+;;
+fortissl|ofvpn|of)
+   ofvpn
+;;
+ipsec)
+   if [[ -z "$VPNID" ]] ; then
+      echo -n " Peer ID:"
+      read -r VPNID
+      echo -n "  Phase1:"
+      read -r VPNPHASE1
+      echo -n "  Phase2:"
+      read -r VPNPHASE2
+      echo -n "     PSK:"
+      read -rs VPNPSK
+   fi
+
+   ipsecvpn
+;;
+*)
+   echo "No vaild options given; switching to 'cat-to-null' mode."
+   cat &> /dev/null
+   exit
+;;
+esac
+
+savesettings
+
+# These last lines make docker container write to stdout
+# a 'vpnclosedNNN' message (NNN is a random number).
+export VPNCLOSED="vpnclosed$RANDOM"
+todck "echo '$VPNCLOSED'"
+while [[ "$( fmdck )" != "$VPNCLOSED" ]] ; do
+   # fmdck contains a read timeout that is considered sufficient to not to eat all CPU time.
+   true
+done
+
+cleanroutes
