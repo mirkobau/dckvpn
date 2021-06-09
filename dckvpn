@@ -55,6 +55,8 @@ export -f pkgrequirements
 # gives to stdout a bunch of commands for 'eval'
 # that - hopefully - recreate saved variables and theyr respective values
 function loadsettings {
+   dbg "Loading settings from file '$VPNSETTINGSFILE'."
+
    (
       echo "$VPNNAME"
       openssl enc -base64 -d < "$VPNSETTINGSFILE"
@@ -66,13 +68,17 @@ function loadsettings {
    # load these settings replacing the former saved ones.
    # The file will be deleted once correctly loaded.
    if [[ -f "$VPNROUTESFILE" && -s "$VPNROUTESFILE" ]] ; then
+      dbg "Found new routes file '$VPNROUTESFILE': setting new routes."
       echo "export VPNROUTES='$(cat "$VPNROUTESFILE")'"
+
+      dbg "Removing '$VPNROUTESFILE'."
       rm -f "$VPNROUTESFILE"
    fi
 }
 export -f loadsettings
 
 function savesettings {
+   dbg "Saving settings to file 'VPNSETTINGSFILE'."
    (
       echo "$VPNNAME"
       # 'VPNVARNAMES' variable is populated in the global initialization part (see below)
@@ -87,6 +93,7 @@ function savesettings {
    # that file will be populated next time you'll user the VPN.
    # then...(continued in 'loadsettings' function)
    if [[ -f "$VPNROUTESFILE" && ! -s "$VPNROUTESFILE" ]] ; then
+      dbg "Found new routes empty file '$VPNROUTESFILE': populating it."
       echo "$VPNROUTES" > "$VPNROUTESFILE"
    fi
 }
@@ -153,9 +160,15 @@ function indck {
 }
 export -f indck
 
+function dckid {
+   docker ps -q -f "ancestor=dckvpn" -f "name=$VPNNAME"
+}
+export -f dckid
+
 function killdck {
-   docker kill "$1"
-   docker rm "$1"
+   dbg "Killing a previously running container with name '$1'."
+   todevnull docker kill "$1"
+   todevnull docker rm "$1"
 }
 export -f killdck
 
@@ -377,10 +390,13 @@ function ipsecvpn {
 export -f ipsecvpn
 
 function cleanroutes {
+   dbg "Cleaning host's routes."
    # Clean host's old routes.
    for VPNROUTE in $VPNROUTES ; do
       todevnull ip route delete "$VPNROUTE" dev docker0
    done
+
+   dbg "Flushing iptables inside container."
    todck "iptables -F &> /dev/null"
 }
 export -f cleanroutes
@@ -389,6 +405,7 @@ function setroutes {
    # Clean all predefined routes if already defined.
    cleanroutes
 
+   dbg "Setting iptables inside container."
    # FIXED: create better iptables rules, based on the actual
    # interface and/or IP addresses used in docker container.
    # FIXED in functions:
@@ -401,6 +418,7 @@ function setroutes {
    "iptables -t filter -I FORWARD -j REJECT" \
    "iptables -t filter -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT"
 
+   dbg "Setting host's routes."
    # set host's new routes to the container
    for VPNROUTE in $VPNROUTES ; do
       todevnull ip route add $VPNROUTE dev docker0 via $DCKIP 
@@ -408,6 +426,10 @@ function setroutes {
 }
 export -f setroutes
 
+
+
+
+dbg "Checking requirements."
 # Well, Forrest, you'll require..
 pkgrequirements \
    bash \
@@ -426,10 +448,6 @@ export VPNNAME="$1"
 shift
 
 export VPNNAME="${VPNNAME%.dckvpn}"
-while [[ -z "$VPNNAME" ]] ; do
-   echo -n "VPN Name:"
-   read -r VPNNAME
-done
 
 case "$VPNNAME" in
 ls|list|ps)
@@ -447,18 +465,31 @@ kill)
 ;;
 esac
 
+while [[ -z "$VPNNAME" ]] ; do
+   echo -n "VPN Name:"
+   read -r VPNNAME
+done
+
 # We'd like to run in a screen.
 if [[ -z "${STY##.$VPNNAME}" ]] ; then
-   screen -S "$VPNNAME" "$0" "$@"
+   dbg "Spawning a screen session."
+   screen -S "$VPNNAME" "$0" "$VPNNAME" "$@"
+   dbg "Execution continued on screen session.   Bye."
    exit
 fi
 
+dbg "Verifying base image."
 # Verify the base image is ready; if not, prepare it.
 if [[ -z "$(docker image ls dckvpn -q 2> /dev/null)" ]] ; then
+   dbg "Base image not ready."
+
+   dbg "Pulling Fedora."
    # Pull base image.
    # Fedora has been found to be suitable for our needs.
    docker image pull fedora
 
+   dbg "Installing packages inside container."
+   dbg "(this may take a while and will seem unresponsive but..just have faith)"
    # we need some packages to make everything run OK
    docker container run --name dckvpn -i --privileged fedora su <<< '
       dnf -y install iproute iptables iputils nftables tcpdump
@@ -467,14 +498,21 @@ if [[ -z "$(docker image ls dckvpn -q 2> /dev/null)" ]] ; then
       dnf -y upgrade
    '
 
+   dbg "Committing to base image 'dckvpn'."
    # FIXME: check if packages were correctly installed
    #echo -m 256M --cpus 1
    # This will be our image with which we'll work.
    docker commit dckvpn dckvpn
+
+   dbg "Removing temporary container used for image generation."
    # The container is no longer useful.
    docker container rm dckvpn
+
+   dbg "Trying to spit out a welcome message inside a docker container."
    # Spit out a message about the end of preparation.
    docker container run --name dckvpn -it --privileged --rm dckvpn bash -c "echo Image dckvpn is ready."
+
+   dbg "Image preparation ended.   Hopefully without incidents.   -____-"
 fi
 
 # FIXME: verify host's NIC IP address is a link-local (169.254.0.0/16)
@@ -490,16 +528,20 @@ fi
 #           wmic path win32_computersystemproduct get uuid | egrep "^.{8}(-.{4}){4}.{8}"
 export VPNENCPWD="$VPNNAME"
 
-# FIXME: kill an already-running container with same name
+# kill an already-running container with same name
 killdck "$VPNNAME"
 
-# Spawn a container in a bash coprocess.
-# The container is interactive (meaning stdXXX file descriptors are attached to our session)
-# We run as root inside the container, and we get a standard bash environment by elevating our privileges with 'su'.
-# The shell is interactive, meaning that it will receive our stind ad will give us its stdout.
-coproc dckvpnproc {
-   docker container run -i --name "$VPNNAME" --privileged --rm dckvpn su -s /bin/bash 2>&1
-}
+while [[ -z "$( dckid )" ]] ; do
+   dbg "(re)spawning a container in a co-process."
+   # Spawn a container in a bash coprocess.
+   # The container is interactive (meaning stdXXX file descriptors are attached to our session)
+   # We run as root inside the container, and we get a standard bash environment by elevating our privileges with 'su'.
+   # The shell is interactive, meaning that it will receive our stind ad will give us its stdout.
+   coproc dckvpnproc {
+      docker container run -i --name "$VPNNAME" --privileged --rm dckvpn su -s /bin/bash 2>&1
+   }
+   sleep 1
+done
 
 export dckvpnproc
 
@@ -510,12 +552,14 @@ export todckfd=${dckvpnproc[1]}
 export fmdckfd=${dckvpnproc[0]}
 
 # Arbitrary: 2 seconds of read timeout
-export DCKREADTIMEOUT=2
+export DCKREADTIMEOUT=0.4
 
+dbg "Getting host IP address as seen from inside docker (it's the same as from host's point-of-view)."
 # Take host's IP as seen from inside docker.
 # This is (sould be) the same address in host's ip route tables.
 export HOSTIP="$( dckchat 'ip route list exact default | cut -d " " -f 3' )"
 
+dbg "Getting container's IP address."
 # Take container's IP: this will be used when setting host's routes.
 export DCKIP="$( 
    dckchat '
@@ -526,8 +570,6 @@ export DCKIP="$(
       | cut -d " " -f 2
    '
 )"
-
-echo "DCKIP=$DCKIP   HOSTIP=$HOSTIP"
 
 # We'll work on this global variables.
 export VPNVARSFM="$(( $LINENO + 1 ))"
@@ -568,6 +610,7 @@ else
    read -r VPNUSR
    echo -n "     Pwd:"
    read -rs VPNPWD
+   echo
 fi
 
 export VPNTYPE="${VPNTYPE,,}"
@@ -575,6 +618,8 @@ export VPNTYPE="${VPNTYPE,,}"
 # Set routes before starting any kind of VPN client
 setroutes
 
+
+dbg "Choosing VPN Client and launching it."
 case "$VPNTYPE" in
 ov|ovpn|openvpn)
    export VPNTYPE="openvpn"
@@ -591,6 +636,8 @@ fortissl|ofvpn|of)
 ;;
 ipsec)
    if [[ -z "$VPNID" ]] ; then
+      dbg "..oops, it's a IPSEC VPN: we need a bit of extra infos."
+
       echo -n " Peer ID:"
       read -r VPNID
       echo -n "  Phase1:"
@@ -599,22 +646,27 @@ ipsec)
       read -r VPNPHASE2
       echo -n "     PSK:"
       read -rs VPNPSK
+      echo
    fi
 
    ipsecvpn
 ;;
 *)
-   echo "No vaild options given; switching to 'cat-to-null' mode."
+   echo "No vaild options given; switching to 'cat-to-null' mode.   Press ctrl+d to end stdin."
    cat &> /dev/null
    exit
 ;;
 esac
 
+dbg "VPN Client connection phase is over."
+
 # Detach user interface: there's no need for holding user's attention.
 screen -d "$STY"
+dbg "Detached screen.   You can re-attach it with: screen -r $VPNNAME."
 
 savesettings
 
+dbg "Starting VPN Monitor loop."
 # While VPN clients are running inside docker, simply wait.
 # Otherwise, proceed with cleanup.
 while [[ -n "$( indck "pstree | egrep '(openvpn|openconnect|openfortivpn|charon-cmd)'" 2> /dev/null )" ]] ; do
@@ -622,7 +674,7 @@ while [[ -n "$( indck "pstree | egrep '(openvpn|openconnect|openfortivpn|charon-
    if [[ -n "$DCKLINE" ]] ; then
       echo "$DCKLINE"
    fi
-   sleep 0.3
+   sleep 0.4
 done
 
 killdck "$VPNNAME"
