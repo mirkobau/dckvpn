@@ -42,8 +42,14 @@ First, you'll have to build a VM.
 FIXME CONTINUE HERE 20210603
 
 ## USAGE
-dckvpn has no command-line arguments.\
-When dckvpn opens, it will ask for a set of things before actually running the docker image and launching the VPN client.
+If no arguments are given dckvpn will ask for a set of things before actually running the docker image and launching the VPN client.
+You can specify as first arg.
+
+- the VPNNAME
+- 'list'\
+to get a list of open VPN Clients (each one in a corresponding docker container)
+- 'kill' and a VPNNAME\
+to kill a specific container, this ways shuttind down the VPN.
 
 #### VPN Name
 First of all, you'll need to define a VPN Name.\
