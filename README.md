@@ -1,7 +1,7 @@
 # dckvpn
 Builds a docker image based on 'fedora', then uses it as a selective gateway to a variety of multiple concurrently open VPN Clients.
 
-The final purpose is to have, for example, a VPN Client constantly connected to your company, so you'll be able to reach the Domain Controller, the File Server, and the Password Server.\
+The final purpose is to have, for example, a VPN Client constantly connected to your company, so you'll be able to reach the Domain Controller, the File Server, and the Password Server, while concurrently establishing other VPN Clients towards your customer's VPN Gateways.\
 This script will allow you to specify those server's single IP addresses.\
 This way you'll not expose the entire company, while still having an excellent usability.
 
@@ -15,7 +15,7 @@ This script is **NOT** configured with security in mind, but in a certain manner
 
 **Author**: Mirko Graziani (mirkobau)\
 **Name**: dckvpn\
-**Release**: 20210603, from the dining table.\
+**Release**: 20210609, from the dining table.\
 **Language**: bash scripting\
 **Target users**: technical users (FIXME: make a YT video for making this usable by everyone)\
 **Requires**: bash, docker container system, openssl, GNU coreutils.\
