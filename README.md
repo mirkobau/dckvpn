@@ -27,7 +27,7 @@ This script is **NOT** configured with security in mind, but in a certain manner
 
 **Author**: Mirko Graziani (mirkobau)\
 **Name**: dckvpn\
-**Release**: 20210609, from the dining table.\
+**Release**: see inside the script.\
 **Language**: bash scripting\
 **Target users**: technical users (FIXME: make a YT video for making this usable by everyone)\
 **Requires**: bash, docker container system, openssl, GNU coreutils.\
@@ -96,26 +96,3 @@ Phase1 and Phase2 are in the form: CIPHER-HASH-DHGROUP.\
 For example: AES266-SHA256-DH19.
 
 DH Group will automatically be converted to the corresponding cipher suite (ref.: https://wiki.strongswan.org/projects/strongswan/wiki/IKEv1CipherSuites).
-
-
-
-
-### Note1 - for Windows 8/10 (and beyond?)
-Windows 10's network routing strategy is a great system..for domesticated monkeys.
-
-So if you're such that evolved animal that you expect to get what you typed in your routing table..
-
-..then you'll need to cope a couple of minutes with gpedit.msc.\
-So, after opening it:
-
-1. Go to: *Computer Configuration*\*Administrative Templates*\*Network*\*Windows Connection Manager*
-1. Set '*Minimize Number of Simultaneous Connections to Internet or a Windows Domain*' to "**Enabled**" and "**0**".
-1. Reboot
-1. Enjoy it, my little rascal: you're free now.
-
-### Note2 - FIXME: option to choose from other docker images
-But hey, after a quick search this was the only one I found being able to install all required packages without any kind of magic tricks.
-
-And honestly, if it works and this all is about docker, then I don't feel portability as an essential issue.
-
-Ciao!

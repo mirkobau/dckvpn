@@ -3,7 +3,7 @@
 # Name: dckvpn
 # Author: Mirko Graziani (mirkobau)
 # GitHub repo: https://github.com/mirkobau/dckvpn
-# Release: 20210609, from the dining table.
+# Release: 20210610, with a glass of beer in my hand.
 # Language: bash scripting
 # Intended use: technical users (FIXME: make a YT video for making this available to everyone)
 # Requires: bash, docker-ce, screen, openssl, GNU coreutils.
@@ -12,7 +12,7 @@
 # builds a docker image based on 'fedora' and uses it as a
 # selective gateway to a variety of concurrently open VPN Clients.
 #
-# Note1 - for Windows 8/10 (and beyond?)
+# Note for Windows 8/10 (and beyond?)
 # Windows 10's network routing strategy is a great system..for domesticated monkeys.
 # So if you're such that evolved animal that you
 # expect to get what you typed in your routing table..
@@ -24,8 +24,8 @@
 # 3. Reboot
 # 4. Enjoy it, my little rascal: you're free now.
 #
-# Note2 - FIXME: option to choose from other docker images
-# But hey,
+# FIXME: add option to choose from other docker images
+# WONTFIX: But hey,
 # after a quick search this was the only one I found being able
 # to install all required packages without any kind of magic tricks.
 # And honestly, if it works and this all is about docker,
