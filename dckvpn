@@ -1,7 +1,8 @@
 #!/bin/bash
 
-# Author: Mirko Graziani (mirkobau)
 # Name: dckvpn
+# Author: Mirko Graziani (mirkobau)
+# GitHub repo: https://github.com/mirkobau/dckvpn
 # Release: 20210609, from the dining table.
 # Language: bash scripting
 # Intended use: technical users (FIXME: make a YT video for making this available to everyone)
@@ -24,10 +25,11 @@
 # 4. Enjoy it, my little rascal: you're free now.
 #
 # Note2 - FIXME: option to choose from other docker images
-# But hey, after a quick search this was the only one I found
-# being able to install all required packages without any kind of magic tricks.
+# But hey,
+# after a quick search this was the only one I found being able
+# to install all required packages without any kind of magic tricks.
 # And honestly, if it works and this all is about docker,
-# then I don't feel portability as an essential issue.
+# then I don't feel portability as an essential need.
 
 function dbg {
    echo "$@" 1>&2
@@ -124,7 +126,9 @@ export -f fmdck
 #    eating out everything was in buffer before it.
 # 2. read lines from container and echo them to stdout, until we get an empty line
 # 
-# FIXME: (improvement) step2 --> read until we read a ceratin line marker
+# FIXME: (improvement) step2 --> read until we read a certain line marker
+# WONTFIX: there's no need for a line marker at the end of the output,
+# since all functions and loops are built on the line marker at the beginning of output.
 function dckchat {
    export DCKLINEMARK="DCKLINEMARK#$RANDOM"
    export DCKNEXTLINE="$DCKLINEMARK"
@@ -202,6 +206,7 @@ function ovpn {
    # ACCEPT new connections towards "any" on the other side of the tunnel
    dcktables "-o '$OVPNDEV'"
 
+   dbg "Launching openvpn in container."
    export OVPNCMD="openvpn --cd '/etc/openvpn/$VPNNAME' --config '$VPNNAME.ovpn'"
    dckchat "$OVPNCMD 2>&1"
 }
@@ -226,6 +231,7 @@ function ofvpn {
    # to add a command-line argument for accepting gateway's certificate.
    # openfortivpn will exit, so we'll need to re-spawn a second one.
    # FIXME: add a mechanism to only accept a specific certificate.
+   dbg "Launching openfortivpn in container."
    export OFVPNLINE="$( dckchat "$OFVPNCMD 2>&1" )"
    export OFVPNLINE1=""
    while [[ -n "$( indck "pstree | egrep 'openfortivpn'" 2> /dev/null )" && -z "$OFVPNLINE1" ]] ; do
@@ -258,11 +264,14 @@ function ofvpn {
             dcktables "-o '$OFVPNLINEDATAVALUE'"
          ;;
          --trusted-cert)
+            dbg "openfortivpn complained about an untrusted certificate."
             # Add parameters to command line
             export OFVPNCMD="$OFVPNCMD $OFVPNLINEDATANAME $OFVPNLINEDATAVALUE"
 
             # Enqueue a fresh new openfortivpn command inside docker container,
             # and get first lines that it puts on stdout.
+            dbg "Launching openfortivpn in container again,"
+            dbg "this time with --trusted-cert option correctly set."
             export OFVPNLINE="$( dckchat "$OFVPNCMD 2>&1" )"
          ;;
          esac
@@ -273,16 +282,19 @@ export -f ofvpn
 
 
 
-# FIXME: this is still to be reviewed.
-# Lancia un 'openconnect'.
-# Tutti i parametri necessari sono preimpostati nelle variabili di ambiente
+# Interface function to 'openconnect'.
+# All necessary parameters are pre-set in exported environment variables.
 function ocvpn {
+   # Arbitrary interface name
    export OCVPNDEV=tun8
+   # this is gonna be used only once: in the next line,
+   # but I keep it here for clearness.
    export OCVPNCMD="openconnect -i '$OCVPNDEV' '--protocol=$VPNTYPE' -u '$VPNUSR' --passwd-on-stdin '$VPNIP'"
 
+   dbg "Launching openconnect in container."
    export OCVPNLINE="$( dckchat "$OCVPNCMD 2>&1" "$VPNPWD" )"
 
-   # Wait 4 seconds for openconnect to esatblish the connection with gateway.
+   dbg "Waiting 4 seconds (arbitrary) for openconnect to esatblish the connection with gateway."
    sleep 4
 
    while [[ -n "$OCVPNLINE" ]] ; do
@@ -295,6 +307,7 @@ function ocvpn {
       if [[ -n "$OCVPNLINETEST" ]] ; then
          todck "yes"
       elif [[ "$OCVPNLINETEST" == "BBB" ]] ; then
+         # This is here for future uses.
          true
       fi
 
@@ -309,8 +322,12 @@ function ocvpn {
 }
 export -f ocvpn
 
+
+
+# Guess IPSEC VPNs interface function.
+# We use charon-cmd from strongSwan here.
 function ipsecvpn {
-   # https://wiki.strongswan.org/projects/strongswan/wiki/IKEv1CipherSuites
+   # These values are taken from: https://wiki.strongswan.org/projects/strongswan/wiki/IKEv1CipherSuites
    export DHGROUPS="
       s/DH1/modp768/g
       s/DH2/modp1024/g
@@ -336,15 +353,23 @@ function ipsecvpn {
       s/DH31/x25519/g
    "
 
+   # Change 'DHxx' into correspondent parameter for charon-cmd..
+   # ..for so-called 'Phase 1'..
    export VPNPHASE1EDIT="$( sed -re "$DHGROUPS" <<< "$VPNPHASE1" )"
+   # ..and for so-called 'Phase 2'.
    export VPNPHASE2EDIT="$( sed -re "$DHGROUPS" <<< "$VPNPHASE2" )"
 
    # Convert phase1 and phase2 cipher suites definitions to lowercase
    export VPNPHASE1EDIT="${VPNPHASE1EDIT,,}"
    export VPNPHASE2EDIT="${VPNPHASE2EDIT,,}"
 
+   # The default ip route table 220 created by charon-cmd is a "catchall" route.
+   # Here we'll need a more fine-grained routes, so we put this away and create new route rules later.
+   # Here below we're only making sure there's no pre-existing ip route table 220 before we begin to work.
+   dbg "Flushing ip route table 220."
    indck "ip route flush table 220"
 
+   dbg "Launching charon-cmd in container."
    todck \
    "charon-cmd \\
    --host '$VPNIP' \\
@@ -356,23 +381,30 @@ function ipsecvpn {
    --esp-proposal '$VPNPHASE2EDIT' \\
    --debug -1"
 
+   dbg "Waiting 2 seconds (arbitrary), then sending username to charon-cmd."
    sleep 2
    todck "$VPNPSK"
 
+   dbg "Waiting 1 seconds (arbitrary), then sending password to charon-cmd."
    sleep 1
    todck "$VPNPWD"
 
+   dbg "Waiting for charon-cmd to create ip route table 220."
    export VPNCLITABLE=""
    while [[ -z "$VPNCLITABLE" ]] ; do
       sleep 1
       export VPNCLITABLE="$( indck "ip route list table 220 exact default" )"
    done
 
+   dbg "Extracting informations from ip route table 220."
+
    export VPNCLIDEV="${VPNCLITABLE##* dev }"
    export VPNCLIDEV="${VPNCLIDEV%% *}"
 
    export VPNCLIIP="${VPNCLITABLE##* src }"
    export VPNCLIIP="${VPNCLIIP%% *}"
+
+   dbg "Flushing ip route table 220 and creating fine-grained routes."
 
    indck "ip route flush table 220"
    for VPNROUTE in $VPNROUTES ; do
@@ -660,9 +692,10 @@ esac
 
 dbg "VPN Client connection phase is over."
 
+dbg "Detaching screen in 3 seconds.   You can re-attach it with: screen -r $VPNNAME."
+sleep 3
 # Detach user interface: there's no need for holding user's attention.
 screen -d "$STY"
-dbg "Detached screen.   You can re-attach it with: screen -r $VPNNAME."
 
 savesettings
 
