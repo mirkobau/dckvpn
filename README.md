@@ -37,7 +37,7 @@ This script is **NOT** configured with security in mind, but in a certain manner
 1. Install an hypervisor with host-only network interfaces capability. \
 (I used Oracle VirtualBox)
 2. Build a basic linux VM (oh, c'mon, **don't** ask me how to do it)
-3. Set an host-only Virtual NIC with IP address in link-local address space (see: https://www.iana.org/assignments/iana-ipv4-special-registry/iana-ipv4-special-registry.xhtml).\
+3. Set an host-only Virtual NIC with IP address in link-local address space (see: https://www.iana.org/assignments/iana-ipv4-special-registry/iana-ipv4-special-registry.xhtml ).\
 Say, we'll give 169.254.86.1/30 for the VM and 169.254.86.2/30 to VirtualBox Network Card on the Windows side.\
 This will be the direct channel between your Windows host and the Linux VM.\
 It'll be a default route for your personalized VPN networks, too.\
@@ -45,13 +45,10 @@ It'll be a default route for your personalized VPN networks, too.\
 (*if you're wondering about the meaning of that '86' in IP Address, here's your answer: 169+254+86+1+2 = 512 = 2^9 -- a power of two.   I always make these stupid little tricky things, like a mantra that remembers you that computers have **nothing** to share with powers of 10*)
 4. Set a second interface to your Linux VM, configured as 'NAT'.\
 This will be the default gateway of your Linux VM.
-5. Put 'dckvpn' in a runable directory.\
+6. Put 'dckvpn' in a runable directory.\
 Say, /usr/local/bin, or /root/bin (you'll probably need to create this dir).
-6. Don't forget to `chmod 700 dckvpn`
+6. Don't forget to `chmod 700 dckvpn` and to set `root:root` as owner.
 7. Run dckvpn and follow the USAGE below.
-
-First, you'll have to build a VM.
-FIXME CONTINUE HERE 20210603
 
 ## USAGE
 If no arguments are given dckvpn will ask for a set of things before actually running the docker image and launching the VPN client.
