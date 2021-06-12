@@ -51,11 +51,11 @@ Say, /usr/local/bin, or /root/bin (you'll probably need to create this dir).
 7. Run dckvpn and follow the USAGE below.
 
 ## USAGE
-If no arguments are given dckvpn will ask for a set of things before actually running the docker image and launching the VPN client.
-You can specify as first arg.
+If no arguments are given dckvpn will ask for a set of things before actually running the docker image and launching the VPN client.\
+Otherwise, you can specify as first arg:
 
 - the VPNNAME
-- 'list'\
+- 'list' (or 'ls' or 'ps')\
 to get a list of open VPN Clients (each one in a corresponding docker container)
 - 'kill' and a VPNNAME\
 to kill a specific container, this ways shuttind down the VPN.
