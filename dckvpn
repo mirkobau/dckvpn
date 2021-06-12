@@ -502,8 +502,8 @@ while [[ -z "$VPNNAME" ]] ; do
    read -r VPNNAME
 done
 
-# We'd like to run in a screen.
-if [[ -z "${STY##.$VPNNAME}" ]] ; then
+# We'd like to run in a screen, but only if stdin is a terminal.
+if [[ -z "${STY##.$VPNNAME}" && -t 0 ]] ; then
    dbg "Spawning a screen session."
    screen -S "$VPNNAME" "$0" "$VPNNAME" "$@"
    dbg "Execution continued on screen session.   Bye."
@@ -572,7 +572,21 @@ while [[ -z "$( dckid )" ]] ; do
    coproc dckvpnproc {
       docker container run -i --name "$VPNNAME" --privileged --rm dckvpn su -s /bin/bash 2>&1
    }
-   sleep 1
+
+   export TIMETOGIVEUP=3
+   export TIMETOGIVEUP=$(( $SECONDS + $TIMETOGIVEUP ))
+   while [[ "$SECONDS" -le "$TIMETOGIVEUP" && -z "$( docker inspect -f {{.State.Running}} "$VPNNAME" 2> /dev/null )" ]] ; do
+      dbg "Waiting for container in coprocess with PID $dckvpnproc_PID to be inspectable."
+      sleep 0.1
+   done
+
+   dbg "Inspecting status of container with PID $dckvpnproc_PID."
+   export TIMETOGIVEUP=8
+   export TIMETOGIVEUP=$(( $SECONDS + $TIMETOGIVEUP ))
+   while [[ "$SECONDS" -le "$TIMETOGIVEUP" && "$( docker inspect -f {{.State.Running}} "$VPNNAME" 2> /dev/null )" != "true" ]] ; do
+      dbg "Waiting for container in coprocess with PID $dckvpnproc_PID to be ready."
+      sleep 0.4
+   done
 done
 
 export dckvpnproc
@@ -692,10 +706,13 @@ esac
 
 dbg "VPN Client connection phase is over."
 
-dbg "Detaching screen in 3 seconds.   You can re-attach it with: screen -r $VPNNAME."
-sleep 3
-# Detach user interface: there's no need for holding user's attention.
-screen -d "$STY"
+# Detach screen only if we're on a screen, and it's the right screen
+if [[ -n "$STY" && "$STY" =~ [[:digit:]]+\.$VPNNAME ]] ; then
+   dbg "Detaching screen in 3 seconds.   You can re-attach it with: screen -r $VPNNAME."
+   sleep 3
+   # Detach user interface: there's no need for holding user's attention.
+   screen -d "$STY"
+fi
 
 savesettings
 
