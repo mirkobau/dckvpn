@@ -1,5 +1,5 @@
 # dckvpn
-Builds a docker image based on 'fedora', then uses it as a selective gateway to a variety of multiple concurrently open VPN Clients.
+Builds a docker image based on 'fedora', then uses it as a selective VPN gateway to a variety of multiple concurrently open VPN Clients.
 
 With "a veriety of" meaning these clients and VPN types:
 - charon-cmd by StrongSWAN, for
@@ -12,6 +12,8 @@ With "a veriety of" meaning these clients and VPN types:
   - (still to implement) Pulse Connect Secure SSL VPN
   - (still to implement) Juniper Network Connect
 - OpenFortiVPN for FortiNet's FortiClient SSL VPN
+
+
 
 The final purpose is to have, for example, a VPN Client constantly connected to your company, so you'll be able to reach the Domain Controller, the File Server, and the Password Server.\
 This script will allow you to specify those server's single IP addresses.\
