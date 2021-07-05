@@ -3,7 +3,7 @@
 # Name: dckvpn
 # Author: Mirko Graziani (mirkobau)
 # GitHub repo: https://github.com/mirkobau/dckvpn
-# Release: 20210629, after a silent night.
+# Release: 20210705, biting my nails after a heavy day
 # Language: bash scripting
 # Intended use: technical users (FIXME: make a YT video for making this available to everyone)
 # Requires: bash, docker-ce, screen, openssl, GNU coreutils.
