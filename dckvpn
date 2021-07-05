@@ -212,9 +212,15 @@ function dckwait4 {
    export DCKWAITPATTERN="$1"
    shift
 
+   export DCKWAITPROCESSES="$1"
+   shift
+   export DCKWAITPROCESSES="${DCKWAITPROCESSES//,/|}"
+   export DCKWAITPROCESSES="${DCKWAITPROCESSES// /|}"
+   export DCKWAITPROCESSES="${DCKWAITPROCESSES:+($DCKWAITPROCESSES)}"
+
    export DCKLINES=""
-   dbg "Waiting for specific line from container."
-   while [[ -z "$( egrep "$DCKWAITPATTERN" <<< "$DCKLINES" )" ]] ; do
+   #dbg "Waiting for specific line from container."
+   while [[ -z "$( egrep "$DCKWAITPATTERN" <<< "$DCKLINES" )" && -n "$( indck pstree | egrep "$DCKWAITPROCESSES" )" ]] ; do
       dbg "$DCKLINES"
       sleep 0.1
       export DCKLINES="$( fmdck )"
@@ -292,8 +298,8 @@ function dcknetnew {
    case "$DCKNETDRIVER" in
    bridge)
       export DCKNETOPTS="$DCKNETOPTS -o 'com.docker.network.bridge.name=$DCKIFACE'"
-      export DCKNETOPTS="$DCKNETOPTS -o 'com.docker.network.bridge.enable_ip_masquerade=true'"
-      export DCKNETOPTS="$DCKNETOPTS -o 'com.docker.network.bridge.enable_icc=false'"
+      export DCKNETOPTS="$DCKNETOPTS -o 'com.docker.network.bridge.enable_ip_masquerade=false'"
+      export DCKNETOPTS="$DCKNETOPTS -o 'com.docker.network.bridge.enable_icc=true'"
       export DCKNETBASE="169.254.86.0"
       export DCKNETBASE="$( ip2dword "$DCKNETBASE" )"
       export DCKNETBASE="$(( $DCKNETBASE + $DCKNETID * 4 ))"
@@ -408,28 +414,41 @@ function dckrun {
       '
    )"
 
-   dbg "Configuring network internals inside container."
+#   dbg "Configuring network internals inside container."
+#   indck \
+#   "echo 2 > /proc/sys/net/ipv4/tcp_syn_retries"
+
+   dbg "Setting iptables inside container."
+   # FIXED: create better iptables rules, based on the actual
+   # interface and/or IP addresses used in docker container.
+   # FIXED in functions:
+   # ovpn: DONE
+   # ofvpn: DONE
+   # ocvpn: DONE
+   # ipsecvpn: DONE
+   # Build basic iptables rules
    indck \
-   "echo 2 > /proc/sys/net/ipv4/tcp_syn_retries"
+   "iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu" \
+   "iptables -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu" \
+   "iptables -t filter -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT" \
+   "iptables -t filter -A FORWARD -j REJECT"
 }
 export -f dckrun
 
 function dckwait {
    dbg "Starting VPN Monitor loop."
+
    # While VPN clients are running inside docker, simply wait.
-   # Otherwise, proceed with cleanup.
-   while [[ -n "$( indck "pstree | egrep '(openvpn|openconnect|openfortivpn|charon-cmd|tcpdump)'" 2> /dev/null )" ]] ; do
-      export DCKLINE="$( fmdck 2> /dev/null )"
-      dbg "$DCKLINE"
-      sleep 0.1
-   done
+   dckwait4 "$( uuidgen )" "openvpn,openconnect,openfortivpn,charon-cmd,tcpdump"
+
    dbg "VPN Monitor loop finished."
+   dbg "Cleanup."
+
+   cleanroutes
 
    killdck "$VPNNAME"
 
    dcknetdel
-
-   cleanroutes
 }
 export -f dckwait
 
@@ -601,16 +620,17 @@ function ocvpn {
          "$VPNPWD"
          
          dbg "Waiting initial connection response from openconnect."
-         export OCVPNLINE="$( dckwait4 "^(Failed to connect|Connected to) " )"
+         export OCVPNLINE="$( dckwait4 "^(Failed to (connect|open HTTPS connection to)|Connected to) " "openconnect" )"
          dbg "Gotcha!"
       fi
 
       dbg "$OCVPNLINE"
+      export OCVPNLINE="${OCVPNLINE:- }"
 
       # This comes just before "Enter 'yes' to accept, 'no' to abort" line.
       # Line that will not be read until someone enters something, so the stdout will spit out a newline.
       # This is why we look for the "line before" instead of the effective one.
-      if [[ "${OCVPNLINE:0:12}" == "--servercert" ]] ; then
+      if [[ -z "${OCVPNLINE%--servercert *}" ]] ; then
          dbg "Openconnect needs an extra parameter: killing it and restarting over."
          indck "killall openconnect"
 
@@ -622,7 +642,12 @@ function ocvpn {
          indck "killall openconnect"
          break
       
-      elif [[ "${OCVPNLINE:0:21}" == "Failed to connect to " ]] ; then
+      elif [[ -z "${OCVPNLINE%Failed to open HTTPS connection to *}" ]] ; then
+         dbg "Connection failed - can't connect to peer. Giving up."
+         indck "killall openconnect"
+         break
+
+      elif [[ -z  "${OCVPNLINE%Failed to connect to *}" ]] ; then
          if [[ -z "${OCVPNLINE%%* Connection timed out}" ]] ; then
             export OCVPNLINE="."
          else
@@ -631,7 +656,13 @@ function ocvpn {
             break
          fi
 
-      elif [[ "${OCVPNLINE:0:13}" == "Connected as " ]] ; then
+      elif [[ "$OCVPNLINE" == "Please select GlobalProtect gateway." ]] ; then
+         # Send ENTER to confirm sugested choice (GATEWAY: [...])
+         todck ""
+         # This makes next loop to read a new line from container
+         export OCVPNLINE=""
+
+      elif [[ -z "${OCVPNLINE%Connected as *}" ]] ; then
          # Set up firewall
          dcktables "-o '$OCVPNDEV'"
          break
@@ -694,6 +725,26 @@ function ipsecvpn {
    dbg "Flushing ip route table 220."
    indck "ip route flush table 220"
 
+   dbg "Configuring charon-cmd."
+   todck \
+   "cat > '/etc/strongswan/strongswan.d/charon-logging.conf' << EOF" "
+charon-cmd {
+   filelog {
+      stderr {
+         default = 1
+         flush_line = yes
+      }
+   }
+}
+EOF" \
+#We don't use this at the moment.
+#We just send PSK and password through stdin when charon-cmd asks for it.
+#   "cat > '/etc/strongswan/ipsec.secrets' << EOF" "
+#$VPNIP : PSK \"$VPNPSK\"
+#$VPNUSR : EAP \"$VPNPWD\"
+#$VPNUSR : XAUTH \"$VPNPWD\"
+#EOF"
+
    dbg "Launching charon-cmd in container."
    todck \
    "charon-cmd \\
@@ -704,46 +755,61 @@ function ipsecvpn {
    --profile ikev1-xauth-psk-am \\
    --ike-proposal '$VPNPHASE1EDIT' \\
    --esp-proposal '$VPNPHASE2EDIT' \\
-   --debug 0"
+   --debug 1 \\
+   2>&1"
 
-   dbg "Waiting 2 seconds (arbitrary), then sending username to charon-cmd."
-   sleep 2
-   todck "$VPNPSK"
+   export DCKWAITROADMAP=""
+   export DCKWAITROADMAP="$DCKWAITROADMAP||PSK request|^Preshared Key:|VPNPSK"
+   export DCKWAITROADMAP="$DCKWAITROADMAP||password request|^EAP password:|VPNPWD"
+   export DCKWAITROADMAP="$DCKWAITROADMAP||SA to go up|\\[IKE\\] CHILD_SA .+ established with SPIs |"
+   while [[ -n "$DCKWAITROADMAP" ]] ; do
+      export DCKWAITROADMAP="${DCKWAITROADMAP#||}"
+      export DCKWAITFOR="${DCKWAITROADMAP%%|*}"
+      export DCKWAITROADMAP="${DCKWAITROADMAP#*|}"
+      export DCKWAITGREP="${DCKWAITROADMAP%%|*}"
+      export DCKWAITROADMAP="${DCKWAITROADMAP#*|}"
+      export DCKWAITVAR="${DCKWAITROADMAP%%|*}"
+      export DCKWAITROADMAP="${DCKWAITROADMAP:${#DCKWAITVAR}}"
 
-   dbg "Waiting 1 seconds (arbitrary), then sending password to charon-cmd."
-   sleep 1
-   todck "$VPNPWD"
+      dbg "Waiting for $DCKWAITFOR."
+      export DCKWAITOUT="$( dckwait4 "$DCKWAITGREP" "charon-cmd" )"
+      dbg "$DCKWAITOUT"
+      if [[ -n "$DCKWAITOUT" ]] ; then
+         eval "todck \"\$$DCKWAITVAR\""
+      else
+         export DCKWAITROADMAP=""
+         export DCKWAITOUT=""
+      fi
+   done
 
-   dbg "Waiting for charon-cmd to create ip route table 220."
-   export VPNCLITABLE=""
-   while [[ -z "$VPNCLITABLE" ]] ; do
-      fmdck
-      sleep 0.1
+   if [[ -n "$DCKWAITOUT" ]] ; then
+      dbg "Extracting informations from ip route table 220."
+
       export VPNCLITABLE="$( indck "ip route list table 220 exact default" )"
-   done
 
-   dbg "Extracting informations from ip route table 220."
+      export VPNCLIDEV="${VPNCLITABLE##* dev }"
+      export VPNCLIDEV="${VPNCLIDEV%% *}"
 
-   export VPNCLIDEV="${VPNCLITABLE##* dev }"
-   export VPNCLIDEV="${VPNCLIDEV%% *}"
+      export VPNCLIIP="${VPNCLITABLE##* src }"
+      export VPNCLIIP="${VPNCLIIP%% *}"
 
-   export VPNCLIIP="${VPNCLITABLE##* src }"
-   export VPNCLIIP="${VPNCLIIP%% *}"
+      dbg "Flushing ip route table 220 and creating fine-grained routes."
 
-   dbg "Flushing ip route table 220 and creating fine-grained routes."
+      indck "ip route flush table 220"
+      for VPNROUTE in $VPNROUTES ; do
+         # while remaining a best practice, this adds an
+         # uncomfortable '-j MASQUERADE' rule to POSTROUTING chain in nat table.
+         # We don't care too much about this,
+         # because the -j SNAT (see below) will take precedence
+         dcktables "-d '$VPNROUTE'"
 
-   indck "ip route flush table 220"
-   for VPNROUTE in $VPNROUTES ; do
-      # while remaining a best practice, this adds an
-      # uncomfortable '-j MASQUERADE' rule to POSTROUTING chain in nat table.
-      # We don't care too much about this,
-      # because the -j SNAT (see below) will take precedence
-      dcktables "-d '$VPNROUTE'"
-
-      indck \
-      "ip route add '$VPNROUTE' dev $VPNCLIDEV via '$VPNCLIIP' table 220" \
-      "iptables -t nat -I POSTROUTING -d '$VPNROUTE' -j SNAT --to-source '$VPNCLIIP'"
-   done
+         indck \
+         "ip route add '$VPNROUTE' dev $VPNCLIDEV via '$VPNCLIIP' table 220" \
+         "iptables -t nat -I POSTROUTING -d '$VPNROUTE' -j SNAT --to-source '$VPNCLIIP'"
+      done
+   else
+      dbg "charon-cmd daemon ended. Failing."
+   fi
 }
 export -f ipsecvpn
 
@@ -762,19 +828,6 @@ export -f cleanroutes
 function setroutes {
    # Clean all predefined routes if already defined.
    cleanroutes
-
-   dbg "Setting iptables inside container."
-   # FIXED: create better iptables rules, based on the actual
-   # interface and/or IP addresses used in docker container.
-   # FIXED in functions:
-   # ovpn: DONE
-   # ofvpn: DONE
-   # ocvpn: DONE
-   # ipsecvpn: DONE
-   # Build basic iptables rules
-   indck \
-   "iptables -t filter -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT" \
-   "iptables -t filter -A FORWARD -j REJECT"
 
    dbg "Setting host's routes."
    # set host's new routes to the container
@@ -933,21 +986,11 @@ fi
 
 export VPNTYPE="${VPNTYPE,,}"
 
-# get docker network ids
-# inspect each network
-# extract network Name as a raw string
-# cut off everything except numeric ID
-# numerically sort all IDs
-# keep only the last ID
-export DCKNETID="$(
-   docker network ls -q -f "driver=bridge" -f "name=dck*" \
-   | xargs -I§ bash -c "docker network inspect § \
-   | jq -r .[].Name" \
-   | cut -d n -f 2 \
-   | sort -n \
-   | tail -n 1 \
-)"
-export DCKNETID="$(( $DCKNETID + 1 ))"
+dbg "Looking for a free DCKNETID."
+export DCKNETID=1
+while [[ -n "$( docker network ls -qf "name=dcklan$DCKNETID" )" || -n "$( docker network ls -qf "name=dckwan$DCKNETID" )" ]] ; do
+   export DCKNETID="$(( $DCKNETID + 1 ))"
+done
 # Network name can't exceed 15 characters.
 # This forces us to use a NETID instead of "dcklan-$VPNNAME" and "dckwan-$VPNNAME".
 export DCKLANIFACENAME="dcklan$DCKNETID"
