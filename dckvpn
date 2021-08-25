@@ -32,6 +32,9 @@
 # then I don't feel portability as an essential need.
 
 function dbg {
+   #for DBGLINE in "$@" ; do
+   #   echo "$DBGLINE" 1>&2
+   #done
    if [[ -n "$@" ]] ; then
       echo "$@" 1>&2
    fi
@@ -161,7 +164,6 @@ function todck {
    for DCKNEXTLINE in "$@" ; do
 #      dbg "$DCKNEXTLINE >&$todckfd"
       echo "$DCKNEXTLINE" >&$todckfd
-      sleep 0.1
    done
 }
 export -f todck
@@ -222,7 +224,6 @@ function dckwait4 {
    #dbg "Waiting for specific line from container."
    while [[ -z "$( egrep "$DCKWAITPATTERN" <<< "$DCKLINES" )" && -n "$( indck pstree | egrep "$DCKWAITPROCESSES" )" ]] ; do
       dbg "$DCKLINES"
-      sleep 0.1
       export DCKLINES="$( fmdck )"
    done
    echo "$DCKLINES"
@@ -240,6 +241,7 @@ function indck {
       echo "$DCKNEXTLINE"
    done \
    | docker container exec -i --privileged "$VPNNAME" su -s /bin/bash
+   #| ssh -q -i "$DCKSSHKEYFILE" -o StrictHostKeyChecking=no "$DCKIP" /bin/bash -s 2>&1
 }
 export -f indck
 
@@ -258,6 +260,9 @@ export -f killdck
 function dcktables {
    export DCKTRAFFICSEL="$1"
    shift
+
+   dbg "iptables -t nat -I POSTROUTING $DCKTRAFFICSEL -j MASQUERADE"
+   dbg "iptables -t filter -I FORWARD $DCKTRAFFICSEL -m state --state NEW -j ACCEPT"
 
    indck \
    "iptables -t nat -I POSTROUTING $DCKTRAFFICSEL -j MASQUERADE" \
@@ -360,7 +365,7 @@ function dckrun {
 
       dbg "(re)spawning a container in a co-process."
       # We run as root inside the container, and we get a standard bash environment by elevating our privileges with 'su'.
-      # The shell is interactive, meaning that it will receive our stind ad will give us its stdout.
+      # The shell is interactive, meaning that it will receive our stdin ad will give us its stdout.
       export todckfd="-1"
       export fmdckfd="-1"
       unset dckvpnproc
@@ -414,9 +419,23 @@ function dckrun {
       '
    )"
 
-#   dbg "Configuring network internals inside container."
-#   indck \
-#   "echo 2 > /proc/sys/net/ipv4/tcp_syn_retries"
+   dbg "Configuring network internals inside container."
+   indck \
+   "echo 2 > /proc/sys/net/ipv4/tcp_syn_retries"
+
+   # StrictHostKeyChecking
+   dbg "Setting SSH keys inside container."
+   dckchat \
+   "ssh-keygen -A" \
+   "mkdir /root/.ssh" \
+   "echo '$(cat "$DCKSSHKEYFILE.pub")' > /root/.ssh/authorized_keys"
+
+   dbg "Wiping out container's host key from known_hosts file."
+   ssh-keygen -R "$VPNNAME"
+   ssh-keygen -R "$DCKIP"
+
+   dbg "Launcing SSH Daemon inside container."
+   indck "/usr/sbin/sshd"
 
    dbg "Setting iptables inside container."
    # FIXED: create better iptables rules, based on the actual
@@ -491,7 +510,9 @@ function gwvpn {
    "ip route add 172.16.0.0/12 via '$HOSTIP'" \
    "ip route add 10.0.0.0/8 via '$HOSTIP'" \
 
-   dckchat "tcpdump -nnvvi any"
+   dckchat "tcpdump -nnvvi any 'not host $DCKIP'"
+   #dckchat "tcpdump -nnvvi any ip"
+#   todck "exec tail -f /dev/null"
 }
 export -f gwvpn
 
@@ -513,13 +534,21 @@ function ovpn {
    # cut off everything except interface name
    export OVPNDEV="${OVPNDEV##* }"
 
+   dbg "Launching openvpn in container."
+   export OVPNCMD="openvpn --cd '/etc/openvpn/$VPNNAME' --config '$VPNNAME.ovpn'"
+   dckchat "$OVPNCMD 2>&1"
+
    # MASQUERADE encapsulated traffic, as usual
    # ACCEPT new connections towards "any" on the other side of the tunnel
    dcktables "-o '$OVPNDEV'"
 
-   dbg "Launching openvpn in container."
-   export OVPNCMD="openvpn --cd '/etc/openvpn/$VPNNAME' --config '$VPNNAME.ovpn'"
-   dckchat "$OVPNCMD 2>&1"
+   export OVPNLINE="$( dckwait4 "( ERROR: |Initialization Sequence Completed)" )"
+   echo "$OVPNLINE"
+
+   if [[ -z "${OVPNLINE// ERROR: }" ]] ; then
+      dbg "OpenVPN failed - giving up."
+      indck "killall openvpn"
+   fi
 }
 export -f ovpn
 
@@ -543,6 +572,15 @@ function ofvpn {
    # to add a command-line argument for accepting gateway's certificate.
    # openfortivpn will exit, so we'll need to re-spawn a second one.
    # FIXME: add a mechanism to only accept a specific certificate.
+   #
+   # FIXME:
+   # Intercept connection timed out
+   #    ERROR:  connect: Connection timed out
+   #    INFO:   Closed connection to gateway.
+   #
+   #    ERROR:  connect: Connection timed out
+   #    INFO:   Could not log out.
+
    dbg "Launching openfortivpn in container."
    export OFVPNLINE="$( dckchat "$OFVPNCMD 2>&1" )"
    export OFVPNLINE1=""
@@ -685,28 +723,28 @@ function ipsecvpn {
 
    # These values are taken from: https://wiki.strongswan.org/projects/strongswan/wiki/IKEv1CipherSuites
    export DHGROUPS="
-      s/DH1/modp768/g
-      s/DH2/modp1024/g
-      s/DH5/modp1536/g
-      s/DH14/modp2048/g
-      s/DH15/modp3072/g
-      s/DH16/modp4096/g
-      s/DH17/modp6144/g
-      s/DH18/modp8192/g
-      s/DH22/modp1024s160/g
-      s/DH23/modp2048s224/g
-      s/DH24/modp2048s256/g
-      s/DH25/ecp192/g
-      s/DH26/ecp224/g
-      s/DH19/ecp256/g
-      s/DH20/ecp384/g
-      s/DH21/ecp521/g
-      s/DH27/ecp224bp/g
-      s/DH28/ecp256bp/g
-      s/DH29/ecp384bp/g
-      s/DH30/ecp512bp/g
-      s/DH31/curve25519/g
-      s/DH31/x25519/g
+      s/DH1$/modp768/g
+      s/DH2$/modp1024/g
+      s/DH5$/modp1536/g
+      s/DH14$/modp2048/g
+      s/DH15$/modp3072/g
+      s/DH16$/modp4096/g
+      s/DH17$/modp6144/g
+      s/DH18$/modp8192/g
+      s/DH22$/modp1024s160/g
+      s/DH23$/modp2048s224/g
+      s/DH24$/modp2048s256/g
+      s/DH25$/ecp192/g
+      s/DH26$/ecp224/g
+      s/DH19$/ecp256/g
+      s/DH20$/ecp384/g
+      s/DH21$/ecp521/g
+      s/DH27$/ecp224bp/g
+      s/DH28$/ecp256bp/g
+      s/DH29$/ecp384bp/g
+      s/DH30$/ecp512bp/g
+      s/DH31$/curve25519/g
+      s/DH31$/x25519/g
    "
 
    # Change 'DHxx' into correspondent parameter for charon-cmd..
@@ -832,6 +870,7 @@ function setroutes {
    dbg "Setting host's routes."
    # set host's new routes to the container
    for VPNROUTE in $VPNROUTES ; do
+      dbg ip route add $VPNROUTE dev $DCKLANIFACENAME via $DCKIP 
       todevnull ip route add $VPNROUTE dev $DCKLANIFACENAME via $DCKIP 
    done
 }
@@ -839,16 +878,6 @@ export -f setroutes
 
 
 
-
-dbg "Checking requirements."
-# Well, Forrest, you'll require..
-pkgrequirements \
-   bash \
-   docker-ce \
-   screen \
-   openssl \
-   jq \
-   # ..that- that's about it
 
 # VPN Name is a key value:
 # - it's used to compose the settings file name,
@@ -875,6 +904,14 @@ kill)
 
    exit
 ;;
+exec)
+   export VPNNAME="$1"
+   shift
+
+   screen -S "$VPNNAME-exec$$" docker exec -it --privileged "$VPNNAME" su -
+
+   exit
+;;
 esac
 
 while [[ -z "$VPNNAME" ]] ; do
@@ -888,6 +925,24 @@ if [[ -z "${STY##.$VPNNAME}" && -t 0 ]] ; then
    screen -S "$VPNNAME" "$0" "$VPNNAME" "$@"
    dbg "Execution continued on screen session.   Bye."
    exit
+fi
+
+dbg "Checking package requirements."
+# Well, Forrest, you'll require..
+pkgrequirements \
+   bash \
+   docker-ce \
+   screen \
+   openssl \
+   openssh-clients \
+   jq \
+   # ..that- that's about it
+
+export DCKSSHKEYFILE="dckvpn-id-rsa"
+dbg "Checking if you have SSH private and public key files."
+if [[ ! -f "$DCKSSHKEYFILE" ]] ; then
+   dbg "Generating SSH private and public key files."
+   ssh-keygen -q -b 4096 -f "$DCKSSHKEYFILE" -N ""
 fi
 
 dbg "Verifying base image."
@@ -904,9 +959,11 @@ if [[ -z "$(docker image ls dckvpn -q 2> /dev/null)" ]] ; then
    dbg "(this may take a while and will seem unresponsive but..just have faith)"
    # we need some packages to make everything run OK
    docker container run --name dckvpn -i --privileged fedora su <<< '
-      dnf -y install iproute iptables iputils nftables tcpdump
+      dnf -y install iproute iptables iputils nftables
+      dnf -y install tcpdump nc traceroute bind-utils net-tools
+      dnf -y install procps-ng findutils
       dnf -y install openfortivpn openconnect vpnc openvpn strongswan
-      dnf -y install openssh
+      dnf -y install openssh-clients openssh-server
       dnf -y upgrade
    '
 
@@ -924,7 +981,7 @@ if [[ -z "$(docker image ls dckvpn -q 2> /dev/null)" ]] ; then
    # Spit out a message about the end of preparation.
    docker container run --name dckvpn -it --privileged --rm dckvpn bash -c "echo Image dckvpn is ready."
 
-   dbg "Image preparation ended.   Hopefully without incidents.   -____-"
+   dbg "Image preparation ended.   Hopefully without incidents.   (-__-)"
 fi
 
 # FIXME: verify host's NIC IP address is a link-local (169.254.0.0/16)
